@@ -18,6 +18,12 @@ Related: [PROJECT_PLAN.md](PROJECT_PLAN.md) (backend plan), [DEPLOY_GUIDE.md](DE
 > - The new-order page has an inline "Add a product" form, so a fresh stage isn't stuck with an empty product list.
 > - The pipeline creates the prod hosting stack itself, so only the dev stack is created by hand.
 > - The GitHub variables are `ALLOWED_ORIGINS`, `FRONTEND_DOMAIN` and `FRONTEND_CERT_ARN`. The API URL is derived from the existing `DOMAIN_NAME`.
+>
+> **UI v2 (2026-11-13, deployed to dev only):** Tailwind CSS v4, mobile-first. Phones get a bottom tab bar, order cards and a sticky "Place order" bar; tablets and desktop get a table and a summary sidebar. Also new: stat cards, search plus status filter, a live indicator while orders are pending, and dark mode.
+> - **Searchable product picker:** react-select, the React equivalent of jQuery Select2. jQuery plugins that change the DOM behind React's back cause state bugs.
+> - **SweetAlert2:** delete confirmation, the "Add product" dialog and toasts. The order email is passed as `text`, never `html`, and there's a test proving it isn't rendered as markup.
+> - **Installable:** a web app manifest and icons, so it can be added to a phone's home screen and opens full-screen.
+> - **CSP trade-off:** react-select injects `<style>` tags at runtime, which a strict `style-src 'self'` breaks (verified in Chrome). So `style-src` now allows `'unsafe-inline'`. `script-src` stays `'self'` only, which is the part that stops XSS.
 
 ---
 

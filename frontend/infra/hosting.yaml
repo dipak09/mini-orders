@@ -75,10 +75,13 @@ Resources:
           ContentTypeOptions: { Override: true }
           FrameOptions: { FrameOption: DENY, Override: true }
           ReferrerPolicy: { ReferrerPolicy: strict-origin-when-cross-origin, Override: true }
+          # Scripts stay strict ('self' only). Styles allow 'unsafe-inline' because react-select
+          # (Emotion CSS-in-JS) injects <style> tags at runtime, and static hosting can't issue
+          # per-request nonces. Blocking injected *scripts* is what stops XSS; CSS is low risk.
           ContentSecurityPolicy:
             Override: true
             ContentSecurityPolicy: !Sub >-
-              default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+              default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;
               connect-src 'self' ${ApiOrigin}; frame-ancestors 'none'; base-uri 'self';
               form-action 'self'; object-src 'none'
 
