@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: One-time bootstrap - GitHub Actions OIDC deploy role for mini-orders (no static AWS keys)
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub user or org that owns the repo
+  RepoName:
+    Type: String
+    Default: mini-orders
+  CreateOIDCProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: Set false if the GitHub OIDC provider already exists in this account
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateOIDCProvider, 'true']
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: mini-orders-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateProvider
+                - !Ref GitHubOIDCProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Only jobs bound to a GitHub environment (dev / production) of this repo
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${RepoName}:environment:*
+      # Demo scope: PowerUser + IAM limited to this app's roles.
+      # Production: replace with a least-privilege policy or CloudFormation service role.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: manage-app-roles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/mini-orders-*
+
+Outputs:
+  DeployRoleArn:
+    Description: Put this in the GitHub secret AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt DeployRole.Arn

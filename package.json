@@ -1,0 +1,22 @@
+{
+  "name": "mini-orders",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Event-driven Node.js microservices on AWS (Lambda, API Gateway, DynamoDB, EventBridge, SQS) with CI/CD",
+  "scripts": {
+    "test": "jest --coverage",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverageFrom": ["services/**/*.js"],
+    "coverageThreshold": { "global": { "lines": 80 } }
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1168.0",
+    "@aws-sdk/client-eventbridge": "^3.1168.0",
+    "@aws-sdk/lib-dynamodb": "^3.1168.0",
+    "aws-sdk-client-mock": "^4.1.0",
+    "jest": "^30.5.2"
+  }
+}

@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Mini Orders - event-driven Node.js microservices (API Gateway, Lambda, DynamoDB, EventBridge, SQS)
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]          # Graviton: cheaper + faster
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active                 # X-Ray end-to-end traces
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+
+Resources:
+  # ---------- Shared platform ----------
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub mini-orders-${Stage}
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 100
+
+  # ---------- Catalog service ----------
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  CatalogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: services/catalog/
+      Handler: index.handler
+      Environment:
+        Variables: { TABLE_NAME: !Ref ProductsTable }
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ProductsTable }
+      Events:
+        CreateProduct: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: /products, Method: POST } }
+        ListProducts:  { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: /products, Method: GET } }
+        GetProduct:    { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: "/products/{id}", Method: GET } }
+
+  # ---------- Orders service ----------
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: id, AttributeType: S }]
+      KeySchema: [{ AttributeName: id, KeyType: HASH }]
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  OrdersApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: services/orders/
+      Handler: api.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+          EVENT_BUS_NAME: !Ref EventBus
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref OrdersTable }
+        - EventBridgePutEventsPolicy: { EventBusName: !Ref EventBus }
+      Events:
+        CreateOrder: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: /orders, Method: POST } }
+        GetOrder:    { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: "/orders/{id}", Method: GET } }
+
+  OrdersStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: services/orders/
+      Handler: status.handler
+      Environment:
+        Variables: { TABLE_NAME: !Ref OrdersTable }
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref OrdersTable }
+      Events:
+        NotificationSent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref EventBus
+            Pattern:
+              source: [mini.notifications]
+              detail-type: [NotificationSent]
+
+  # ---------- Notifications service ----------
+  NotificationsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600   # 14 days to investigate failures
+
+  NotificationsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60             # >= 6x function timeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationsDLQ.Arn
+        maxReceiveCount: 3
+
+  OrderCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: [mini.orders]
+        detail-type: [OrderCreated]
+      Targets:
+        - Id: NotificationsQueue
+          Arn: !GetAtt NotificationsQueue.Arn
+
+  NotificationsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref NotificationsQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationsQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !GetAtt OrderCreatedRule.Arn }
+
+  NotificationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: services/notifications/
+      Handler: index.handler
+      Environment:
+        Variables: { EVENT_BUS_NAME: !Ref EventBus }
+      Policies:
+        - EventBridgePutEventsPolicy: { EventBusName: !Ref EventBus }
+      Events:
+        OrderCreatedQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NotificationsQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # ---------- Observability & cost hygiene ----------
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Messages landed in the notifications DLQ
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt NotificationsDLQ.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CatalogLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/${CatalogFunction}', RetentionInDays: 14 }
+  OrdersApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/${OrdersApiFunction}', RetentionInDays: 14 }
+  OrdersStatusLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/${OrdersStatusFunction}', RetentionInDays: 14 }
+  NotificationsLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: !Sub '/aws/lambda/${NotificationsFunction}', RetentionInDays: 14 }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  EventBusName:
+    Value: !Ref EventBus
+  NotificationsDLQUrl:
+    Value: !Ref NotificationsDLQ

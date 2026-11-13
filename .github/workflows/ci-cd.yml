@@ -1,0 +1,96 @@
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a deploy mid-flight
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  # ---------- CI: runs on every PR and push ----------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+      - name: Validate & lint SAM template
+        run: sam validate --lint
+      - name: Build artifacts
+        run: sam build
+
+  # ---------- CD: dev deploys automatically from main ----------
+  deploy-dev:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions: { id-token: write, contents: read }   # OIDC, no long-lived keys
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: sam build
+      - run: >
+          sam deploy --stack-name mini-orders-dev --parameter-overrides Stage=dev
+          --capabilities CAPABILITY_IAM --resolve-s3
+          --no-confirm-changeset --no-fail-on-empty-changeset
+      - id: out
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name mini-orders-dev \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "api_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "### Dev API: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: End-to-end smoke test
+        run: node scripts/smoke-test.mjs
+        env: { API_URL: "${{ steps.out.outputs.api_url }}" }
+
+  # ---------- CD: prod needs manual approval (GitHub environment reviewers) ----------
+  deploy-prod:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: production
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: sam build
+      - run: >
+          sam deploy --stack-name mini-orders-prod --parameter-overrides Stage=prod
+          --capabilities CAPABILITY_IAM --resolve-s3
+          --no-confirm-changeset --no-fail-on-empty-changeset
+      - id: out
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name mini-orders-prod \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "api_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "### Prod API: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Post-deploy smoke test
+        run: node scripts/smoke-test.mjs
+        env: { API_URL: "${{ steps.out.outputs.api_url }}" }
