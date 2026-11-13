@@ -36,7 +36,26 @@ for (let i = 0; i < 15 && status !== 'CONFIRMED'; i++) {
 }
 assert(status === 'CONFIRMED', 'order confirmed asynchronously via events');
 
-// 4. Validation
+// 4. List + delete (also cleans up this run's order)
+const list = await call('GET', '/orders?limit=50');
+assert(list.status === 200 && Array.isArray(list.data.items), 'list orders returns 200');
+const del = await call('DELETE', `/orders/${order.data.id}`);
+assert(del.status === 204, 'delete order returns 204');
+const afterDel = await call('GET', `/orders/${order.data.id}`);
+assert(afterDel.status === 404, 'deleted order returns 404');
+const delAgain = await call('DELETE', `/orders/${order.data.id}`);
+assert(delAgain.status === 404, 'deleting a missing order returns 404');
+
+// 5. CORS preflight for the frontend origin (only when FRONTEND_ORIGIN is set)
+if (process.env.FRONTEND_ORIGIN) {
+  const pre = await fetch(`${API}/orders`, {
+    method: 'OPTIONS',
+    headers: { Origin: process.env.FRONTEND_ORIGIN, 'Access-Control-Request-Method': 'DELETE' },
+  });
+  assert(pre.headers.get('access-control-allow-origin') === process.env.FRONTEND_ORIGIN, `CORS allows ${process.env.FRONTEND_ORIGIN}`);
+}
+
+// 6. Validation
 const bad = await call('POST', '/orders', { customerEmail: 'nope', items: [] });
 assert(bad.status === 400, 'invalid order rejected with 400');
 

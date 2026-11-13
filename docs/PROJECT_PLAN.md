@@ -2,7 +2,7 @@
 
 Goal: get this project live on AWS (paid for by free credit), reachable at **https://aws.hanuda.in**, deployed by the GitHub Actions pipeline, and rehearsed as a demo.
 
-The step-by-step commands are in [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md). This file is the map: what exists, what is missing, and in what order to do the work.
+The step-by-step commands are in [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md). The web frontend (`front.hanuda.in`) is planned in [FRONTEND_PLAN.md](FRONTEND_PLAN.md). This file is the map: what exists, what is missing, and in what order to do the work.
 
 ---
 

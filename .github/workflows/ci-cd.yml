@@ -22,9 +22,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: Frontend - install, lint, typecheck, test, build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build
       - uses: aws-actions/setup-sam@v2
         with: { use-installer: true }
       - name: Validate & lint SAM template
@@ -56,6 +69,7 @@ jobs:
       - run: >
           sam deploy --stack-name mini-orders-dev
           --parameter-overrides Stage=dev DomainName=${{ vars.DOMAIN_NAME }} CertificateArn=${{ vars.CERTIFICATE_ARN }}
+          AllowedOrigins=${{ vars.ALLOWED_ORIGINS || 'http://localhost:5173' }}
           --capabilities CAPABILITY_IAM --resolve-s3
           --no-confirm-changeset --no-fail-on-empty-changeset
       - id: out
@@ -66,7 +80,24 @@ jobs:
           echo "### Dev API: $URL" >> "$GITHUB_STEP_SUMMARY"
       - name: End-to-end smoke test
         run: node scripts/smoke-test.mjs
-        env: { API_URL: "${{ steps.out.outputs.api_url }}" }
+        env:
+          API_URL: "${{ steps.out.outputs.api_url }}"
+          FRONTEND_ORIGIN: "${{ vars.FRONTEND_DOMAIN && format('https://{0}', vars.FRONTEND_DOMAIN) || '' }}"
+      # ---- Frontend: skipped until FRONTEND_CERT_ARN is set for this environment ----
+      - name: Frontend hosting stack
+        if: vars.FRONTEND_CERT_ARN != ''
+        run: >
+          aws cloudformation deploy --template-file frontend/infra/hosting.yaml
+          --stack-name mini-orders-frontend-dev --no-fail-on-empty-changeset
+          --parameter-overrides Stage=dev DomainName=${{ vars.FRONTEND_DOMAIN }}
+          CertificateArn=${{ vars.FRONTEND_CERT_ARN }} ApiOrigin=https://${{ vars.DOMAIN_NAME }}
+      - name: Frontend build and publish
+        if: vars.FRONTEND_CERT_ARN != ''
+        run: |
+          npm ci --prefix frontend
+          frontend/scripts/deploy.sh dev
+          echo "### Frontend: https://${{ vars.FRONTEND_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
+        env: { API_URL: "https://${{ vars.DOMAIN_NAME }}" }
 
   # ---------- CD: prod needs manual approval (GitHub environment reviewers) ----------
   deploy-prod:
@@ -91,6 +122,7 @@ jobs:
       - run: >
           sam deploy --stack-name mini-orders-prod
           --parameter-overrides Stage=prod DomainName=${{ vars.DOMAIN_NAME }} CertificateArn=${{ vars.CERTIFICATE_ARN }}
+          AllowedOrigins=${{ vars.ALLOWED_ORIGINS || 'http://localhost:5173' }}
           --capabilities CAPABILITY_IAM --resolve-s3
           --no-confirm-changeset --no-fail-on-empty-changeset
       - id: out
@@ -101,4 +133,21 @@ jobs:
           echo "### Prod API: $URL" >> "$GITHUB_STEP_SUMMARY"
       - name: Post-deploy smoke test
         run: node scripts/smoke-test.mjs
-        env: { API_URL: "${{ steps.out.outputs.api_url }}" }
+        env:
+          API_URL: "${{ steps.out.outputs.api_url }}"
+          FRONTEND_ORIGIN: "${{ vars.FRONTEND_DOMAIN && format('https://{0}', vars.FRONTEND_DOMAIN) || '' }}"
+      # ---- Frontend: skipped until FRONTEND_CERT_ARN is set for this environment ----
+      - name: Frontend hosting stack
+        if: vars.FRONTEND_CERT_ARN != ''
+        run: >
+          aws cloudformation deploy --template-file frontend/infra/hosting.yaml
+          --stack-name mini-orders-frontend-prod --no-fail-on-empty-changeset
+          --parameter-overrides Stage=prod DomainName=${{ vars.FRONTEND_DOMAIN }}
+          CertificateArn=${{ vars.FRONTEND_CERT_ARN }} ApiOrigin=https://${{ vars.DOMAIN_NAME }}
+      - name: Frontend build and publish
+        if: vars.FRONTEND_CERT_ARN != ''
+        run: |
+          npm ci --prefix frontend
+          frontend/scripts/deploy.sh prod
+          echo "### Frontend: https://${{ vars.FRONTEND_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
+        env: { API_URL: "https://${{ vars.DOMAIN_NAME }}" }

@@ -15,6 +15,10 @@ Parameters:
     Type: String
     Default: arn:aws:acm:ap-southeast-2:000000000000:certificate/not-set
     Description: ACM certificate in this region. Only used when DomainName is set
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:5173
+    Description: Browser origins allowed by CORS (the frontend URLs). No trailing slash
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, '']]
@@ -43,6 +47,12 @@ Resources:
       DefaultRouteSettings:
         ThrottlingBurstLimit: 10
         ThrottlingRateLimit: 5
+      # CORS lets the frontend's JavaScript call the API. It is NOT access control: curl ignores it.
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowMethods: [GET, POST, DELETE]
+        AllowHeaders: [content-type]
+        MaxAge: 600
   
   ApiDomain:
     Type: AWS::ApiGatewayV2::DomainName
@@ -110,6 +120,8 @@ Resources:
       Events:
         CreateOrder: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: /orders, Method: POST } }
         GetOrder:    { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: "/orders/{id}", Method: GET } }
+        ListOrders:  { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: /orders, Method: GET } }
+        DeleteOrder: { Type: HttpApi, Properties: { ApiId: !Ref HttpApi, Path: "/orders/{id}", Method: DELETE } }
 
   OrdersStatusFunction:
     Type: AWS::Serverless::Function

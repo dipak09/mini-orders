@@ -1,7 +1,7 @@
 'use strict';
 // Orders service (HTTP) — creates orders and publishes OrderCreated to EventBridge.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, ScanCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 const { EventBridgeClient, PutEventsCommand } = require('@aws-sdk/client-eventbridge');
 const { randomUUID } = require('node:crypto');
 
@@ -15,6 +15,22 @@ const json = (statusCode, body) => ({
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
 });
+const noContent = () => ({ statusCode: 204 });
+
+const MAX_LIMIT = 50;
+const DEFAULT_LIMIT = 20;
+
+// Opaque pagination cursor = DynamoDB LastEvaluatedKey as base64url JSON.
+// Decoded cursors are validated so client input is never passed blindly to DynamoDB.
+const encodeCursor = (key) => Buffer.from(JSON.stringify(key)).toString('base64url');
+function decodeCursor(cursor) {
+  try {
+    const key = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const keys = key && typeof key === 'object' ? Object.keys(key) : [];
+    if (keys.length === 1 && keys[0] === 'id' && typeof key.id === 'string' && key.id) return { id: key.id };
+  } catch { /* fall through */ }
+  return null;
+}
 const log = (level, msg, extra = {}) =>
   console.log(JSON.stringify({ level, service: 'orders', msg, ...extra }));
 
@@ -78,11 +94,50 @@ async function getOrder(event) {
   return res.Item ? json(200, res.Item) : json(404, { message: 'Order not found' });
 }
 
+async function listOrders(event) {
+  const q = event.queryStringParameters || {};
+  let limit = DEFAULT_LIMIT;
+  if (q.limit !== undefined) {
+    limit = Number(q.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) return json(400, { message: `limit must be an integer 1-${MAX_LIMIT}` });
+  }
+  let startKey;
+  if (q.cursor !== undefined) {
+    startKey = decodeCursor(q.cursor);
+    if (!startKey) return json(400, { message: 'invalid cursor' });
+  }
+  // Scan is fine for a demo. At scale: GSI (pk="ORDER", sk=createdAt) + Query, newest first.
+  const res = await ddb.send(new ScanCommand({ TableName: TABLE, Limit: limit, ExclusiveStartKey: startKey }));
+  const items = (res.Items || []).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  const body = { items };
+  if (res.LastEvaluatedKey) body.nextCursor = encodeCursor(res.LastEvaluatedKey);
+  return json(200, body);
+}
+
+async function deleteOrder(event) {
+  const id = event.pathParameters && event.pathParameters.id;
+  try {
+    await ddb.send(new DeleteCommand({
+      TableName: TABLE,
+      Key: { id },
+      ConditionExpression: 'attribute_exists(id)',
+    }));
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return json(404, { message: 'Order not found' });
+    throw err;
+  }
+  // A NotificationSent arriving later is a no-op: status.js's conditional update fails on a missing item.
+  log('info', 'order deleted', { orderId: id });
+  return noContent();
+}
+
 exports.handler = async (event) => {
   try {
     switch (event.routeKey) {
       case 'POST /orders': return await createOrder(event);
+      case 'GET /orders': return await listOrders(event);
       case 'GET /orders/{id}': return await getOrder(event);
+      case 'DELETE /orders/{id}': return await deleteOrder(event);
       default: return json(404, { message: 'Route not found' });
     }
   } catch (err) {

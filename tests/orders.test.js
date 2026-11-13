@@ -1,5 +1,5 @@
 const { mockClient } = require('aws-sdk-client-mock');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, ScanCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 const { EventBridgeClient, PutEventsCommand } = require('@aws-sdk/client-eventbridge');
 
 process.env.TABLE_NAME = 'orders-test';
@@ -50,8 +50,73 @@ describe('orders api', () => {
   });
 
   test('unknown route returns 404', async () => {
-    const res = await api.handler({ routeKey: 'DELETE /orders/{id}' });
+    const res = await api.handler({ routeKey: 'PATCH /orders/{id}' });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+const cursorFor = (key) => Buffer.from(JSON.stringify(key)).toString('base64url');
+
+describe('orders api: list', () => {
+  test('GET /orders returns newest first with a cursor for the next page', async () => {
+    ddbMock.on(ScanCommand).resolves({
+      Items: [
+        { id: 'a', createdAt: '2026-11-13T10:00:00Z' },
+        { id: 'b', createdAt: '2026-11-13T11:00:00Z' },
+      ],
+      LastEvaluatedKey: { id: 'a' },
+    });
+    const res = await api.handler({ routeKey: 'GET /orders', queryStringParameters: { limit: '2' } });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.items.map((o) => o.id)).toEqual(['b', 'a']);
+    expect(body.nextCursor).toBe(cursorFor({ id: 'a' }));
+    expect(ddbMock.commandCalls(ScanCommand)[0].args[0].input.Limit).toBe(2);
+  });
+
+  test('GET /orders passes a valid cursor as ExclusiveStartKey and omits nextCursor on the last page', async () => {
+    ddbMock.on(ScanCommand).resolves({ Items: [] });
+    const res = await api.handler({ routeKey: 'GET /orders', queryStringParameters: { cursor: cursorFor({ id: 'x' }) } });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ items: [] });
+    expect(ddbMock.commandCalls(ScanCommand)[0].args[0].input.ExclusiveStartKey).toEqual({ id: 'x' });
+  });
+
+  test.each([
+    [{ cursor: 'not-base64-json' }],
+    [{ cursor: cursorFor({ id: 'x', extra: 1 }) }],
+    [{ cursor: cursorFor({ id: 42 }) }],
+    [{ limit: '0' }],
+    [{ limit: '51' }],
+    [{ limit: 'abc' }],
+  ])('GET /orders rejects bad query %#', async (qs) => {
+    const res = await api.handler({ routeKey: 'GET /orders', queryStringParameters: qs });
+    expect(res.statusCode).toBe(400);
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+  });
+});
+
+describe('orders api: delete', () => {
+  test('DELETE /orders/{id} deletes conditionally and returns 204', async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    const res = await api.handler({ routeKey: 'DELETE /orders/{id}', pathParameters: { id: 'o1' } });
+    expect(res.statusCode).toBe(204);
+    const input = ddbMock.commandCalls(DeleteCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ id: 'o1' });
+    expect(input.ConditionExpression).toBe('attribute_exists(id)');
+  });
+
+  test('DELETE /orders/{id} returns 404 when the order does not exist', async () => {
+    const err = new Error('conditional'); err.name = 'ConditionalCheckFailedException';
+    ddbMock.on(DeleteCommand).rejects(err);
+    const res = await api.handler({ routeKey: 'DELETE /orders/{id}', pathParameters: { id: 'gone' } });
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('DELETE /orders/{id} returns 500 on unexpected errors', async () => {
+    ddbMock.on(DeleteCommand).rejects(new Error('throttled'));
+    const res = await api.handler({ routeKey: 'DELETE /orders/{id}', pathParameters: { id: 'o1' } });
+    expect(res.statusCode).toBe(500);
   });
 });
 
@@ -68,6 +133,13 @@ describe('orders status consumer', () => {
     const err = new Error('conditional'); err.name = 'ConditionalCheckFailedException';
     ddbMock.on(UpdateCommand).rejects(err);
     await expect(status.handler({ detail: { orderId: 'o1' } })).resolves.toBeUndefined();
+  });
+
+  test('ignores NotificationSent for an order that was deleted meanwhile', async () => {
+    // DynamoDB fails the `#s = :pending` condition when the item no longer exists.
+    const err = new Error('conditional'); err.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(err);
+    await expect(status.handler({ detail: { orderId: 'deleted-order' } })).resolves.toBeUndefined();
   });
 
   test('rethrows unexpected errors so EventBridge retries', async () => {

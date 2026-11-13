@@ -9,8 +9,17 @@
   },
   "jest": {
     "testEnvironment": "node",
-    "collectCoverageFrom": ["services/**/*.js"],
-    "coverageThreshold": { "global": { "lines": 80 } }
+    "collectCoverageFrom": [
+      "services/**/*.js"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 80
+      }
+    },
+    "roots": [
+      "<rootDir>/tests"
+    ]
   },
   "devDependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
