@@ -44,9 +44,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                # Only jobs bound to a GitHub environment (dev / production) of this repo
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${RepoName}:environment:*
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${RepoName}:environment:dev
+                  - !Sub repo:${GitHubOrg}/${RepoName}:environment:production
       # Demo scope: PowerUser + IAM limited to this app's roles.
       # Production: replace with a least-privilege policy or CloudFormation service role.
       ManagedPolicyArns:

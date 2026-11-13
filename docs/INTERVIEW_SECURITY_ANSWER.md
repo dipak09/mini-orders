@@ -1,49 +1,43 @@
 # Interview answer: "Describe a security problem you found in a system and how you fixed it"
 
-> **Make it true before you say it.** This story is based on a real flaw in this repo's [infra/github-oidc.yaml](../infra/github-oidc.yaml). The fix is in [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md), steps 4.1 and 4.4. Apply it and run the check in "How I proved it" yourself, so every detail you say is something you did.
+> **Make it true before you say it.** Every step below is real in this repo, but the proof is not done yet. Finish [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md) steps 4.3–4.5 and take the two screenshots in 4.5. Then everything you say is something you did and can show.
 
 ---
 
 ## The answer (about 2 minutes, STAR format)
 
 **Situation.**
-I built a small event-driven order system on AWS: three Node.js services on Lambda, with DynamoDB, EventBridge and SQS, deployed by a GitHub Actions pipeline. Dev deploys automatically from `main`, and prod needs a manual approval.
-
-For the pipeline's AWS access I'd already avoided long-lived access keys. GitHub Actions authenticates with OIDC: each job gets a short-lived token from GitHub, and AWS swaps it for temporary credentials on a deploy role. That role is powerful. It has PowerUser access plus permission to create IAM roles for the app.
+I built a small event-driven order system on AWS: three Node.js services on Lambda, with DynamoDB, EventBridge and SQS, deployed by a GitHub Actions pipeline. Dev deploys automatically from `main`, and prod needs my approval. The pipeline's AWS identity is powerful: PowerUser access plus permission to create IAM roles for the app.
 
 **Task.**
-Before putting it on a public URL I reviewed the pipeline's trust boundary. The question I asked was: *who, exactly, can get these AWS credentials?*
+Before putting it on a public URL, I reviewed the pipeline's trust boundary. The question I asked was: *who, exactly, can get these AWS credentials?*
 
-**Action — what I found.**
-The role's trust policy checked the token's `sub` claim against this pattern:
+**Action — first finding.**
+My original design used GitHub OIDC, so there were no stored keys. The deploy role's trust policy matched the token's subject against `repo:<me>/mini-orders:environment:*`. The intent was "only my `dev` and `production` environments". But GitHub creates an environment automatically the first time a workflow names one. So anyone with push access to *any branch* could write `environment: anything` and get PowerUser credentials. That bypassed code review and the prod approval gate. I fixed it with exact `StringEquals` matches on the two environments.
 
-```
-repo:<me>/mini-orders:environment:*
-```
+**Action — then the platform changed the problem.**
+When I deployed that role, AWS refused to create the OIDC provider. My account is one of AWS's new "project" accounts, and an AWS-managed service control policy denies `iam:*Provider*` on both the free and the paid plan. So I *had* to use a long-lived access key, which is the thing OIDC was meant to avoid.
 
-The intent was "only jobs running in my `dev` or `production` GitHub environments". But the wildcard matches **any** environment name, and GitHub creates an environment automatically the first time a workflow refers to one that doesn't exist. Nothing restricted which branches could use the `dev` environment either.
+Rather than just pasting the key into GitHub, I asked the same question again: who can read it? The default, a repository secret, is readable by a workflow on any branch, so it's the same hole in a different place. I closed it in four layers:
 
-So anyone with push access to *any branch* could add a workflow with `environment: anything`, run it, and get PowerUser credentials in my AWS account. That skipped code review, the `main`-only rule and the prod approval gate entirely. The approval gate looked like a control, but the credentials were reachable without going through it.
-
-**Action — how I fixed it.** Three layers:
-
-1. **Exact match in AWS.** I replaced the wildcard with the two exact subjects, `...:environment:dev` and `...:environment:production`, using `StringEquals` instead of `StringLike`. Made-up environment names no longer match.
-2. **Branch rules in GitHub.** I restricted both environments to deploy only from `main`. A feature branch can't run a job in `dev` or `production` at all, so code has to be reviewed and merged first.
-3. **Prod approval stays.** The `production` environment still needs a required reviewer, and now it actually guards the credentials.
+1. **Environment secrets only.** The key lives only in the `dev` and `production` GitHub environments, never as a repository secret.
+2. **Branch fence.** Both environments accept jobs only from `main`, so code has to be reviewed and merged before it can touch the key. Prod also needs my approval.
+3. **Blast radius.** It's a dedicated deploy-only IAM user, with an explicit deny on creating users or keys and on changing its own policies. A leaked key can't make itself stronger or persist.
+4. **No exposure on the way in.** I scripted the setup so the key goes straight from `aws iam create-access-key` into `gh secret set`. It is never printed, saved to a file or shown in CloudFormation outputs.
 
 **Result — how I proved it.**
-I didn't just trust the policy. I pushed a test branch with a workflow that used `environment: test` and tried to assume the role. Before the fix it got credentials. After the fix it failed with `Not authorized to perform sts:AssumeRoleWithWebIdentity`. The normal `main` → dev → approve → prod pipeline kept working.
+I pushed a feature branch with a probe workflow that tried both routes. The job that tried to enter the `dev` environment was rejected by GitHub's protection rule. The job that tried to read the secret without an environment got an empty value and couldn't authenticate. The real `main` → dev → approve → prod pipeline kept working.
 
 **What I'd do next** (only if asked, or to close strongly):
-the role is still broader than it should be. The next steps are a separate role per environment, so the dev role can only touch `mini-orders-dev` stacks, and replacing PowerUser with a scoped policy or a CloudFormation service role.
+key rotation on a schedule, a CloudTrail alert on any use of that key outside GitHub's IP ranges, and a scoped policy instead of PowerUser. And on an account that allows it, I'd go back to OIDC.
 
-**The lesson I took away:** "we use OIDC, so there are no keys" isn't the end of the security story. OIDC moves the risk from *protecting a secret* to *writing the trust policy correctly*, and a wildcard there is as dangerous as a leaked key.
+**The lesson:** the question is never "keys or no keys". It's "who can obtain a credential, and through which path?" I hit the same hole twice, once in an IAM trust policy and once in GitHub's secret scoping, and the same question found it both times.
 
 ---
 
 ## 30-second version
 
-> "In my AWS project the CI/CD pipeline used GitHub OIDC instead of access keys, which is good. But reviewing the deploy role's trust policy, I saw it allowed `environment:*`. GitHub creates environments on demand, so anyone who could push any branch could get PowerUser credentials and bypass review and the prod approval gate. I fixed it in two places: exact `StringEquals` on the dev and production subjects in AWS, and `main`-only deployment branch rules in GitHub. Then I proved it by trying from a test branch. Access was denied, and the real pipeline still worked."
+> "Reviewing my CI/CD pipeline before going public, I asked who could actually get its AWS credentials. First, the OIDC trust policy used `environment:*`. Because GitHub creates environments on demand, any branch could get PowerUser access. I fixed that with exact matches. Then my AWS account turned out to block OIDC entirely, so I had to use an access key. A repo-level secret would have reopened the same hole, so I put it only in environment secrets fenced to `main` with prod approval, used a deploy-only user that can't escalate itself, and scripted the key straight into GitHub without it ever being printed. I proved it with a probe workflow from a feature branch: both attempts were denied."
 
 ---
 
@@ -51,20 +45,22 @@ the role is still broader than it should be. The next steps are a separate role 
 
 | Question | Answer |
 |---|---|
-| How did you find it? | A deliberate review before going public. I listed every path to AWS credentials and checked each one, instead of assuming OIDC made it safe |
-| Why was it so bad? | The role could create IAM roles and change most resources. A malicious or compromised contributor account could take over the account or run up a bill, with no review |
-| Why not just restrict branches in GitHub? | GitHub settings can be changed by repo admins and are easy to miss. The AWS trust policy is the boundary that actually issues credentials, so it has to be strict on its own. I used both |
-| Why not `ref:refs/heads/main` as the subject? | When a job uses an environment, GitHub puts the environment in `sub`, not the branch. So the environment name is what the policy can see; branch rules on the environment cover the branch side |
-| What about pull requests from forks? | Fork PRs don't get an OIDC token with `id-token: write` from the base repo's secrets context, and the PR job in my pipeline has no environment and no AWS permission anyway |
-| What is "audience" (`aud`)? | The intended receiver of the token. It's checked to equal `sts.amazonaws.com`, so a GitHub token minted for some other service can't be replayed against AWS |
-| How would you catch this automatically? | IAM Access Analyzer policy checks in CI, and a lint rule that fails on wildcards in OIDC `sub` conditions |
-| Any other issues you found? | Yes: the API is public and unauthenticated, so I lowered the throttle to 5 requests/second and added a budget alert to cap cost abuse. And a local tool's credentials file wasn't gitignored, so I added it before the first commit |
+| How did you find it? | A deliberate review before going public. I listed every path to credentials and tested each one, instead of assuming the defaults were safe |
+| Why was it serious? | The identity can create IAM roles and change most resources. A compromised contributor account could take over the AWS account or run up a bill, with no review |
+| Why not just use a repository secret? | Any workflow on any branch in the repo can read it. Environment secrets plus branch rules mean only reviewed code on `main` can |
+| Isn't a long-lived key worse than OIDC? | Yes, and I'd use OIDC wherever the platform allows it. Here it was blocked, so I reduced who can read the key, what it can do, and how it could leak |
+| What if the key leaks anyway? | It can't create more users or keys or change its own policy, so the attacker can't persist. Revocation is one command: delete the key. CloudTrail shows every call it made |
+| How do you rotate it? | Delete the key and re-run the setup script, which creates a new key and overwrites the GitHub secrets. That's under a minute |
+| What about pull requests from forks? | Fork PRs don't receive secrets, and the PR job in my pipeline has no environment and needs no AWS access |
+| Why does `environment:*` matter if environments need admin to create? | They don't. Referencing a non-existent environment in a workflow creates it, with no protection rules |
+| How would you catch this automatically? | IAM Access Analyzer policy checks in CI, a lint rule against wildcards in OIDC `sub` conditions, and a check that no AWS credentials exist as repository secrets |
+| Any other issues you found? | Yes: the API is public and unauthenticated, so I lowered the throttle to 5 requests/second and added a budget alert. And a local tool's credentials file wasn't gitignored, so I added it before the first commit |
 
 ---
 
 ## Delivery tips
 
 - Lead with the *question you asked* ("who can get these credentials?"). It shows a method, not luck.
-- Say the impact in plain words: "anyone who could push a branch could get admin-level AWS access".
-- Name the proof. "I tested it from a branch and it was denied" is what separates a real fix from a config change.
-- Don't oversell. Saying "the role is still too broad, here's what's next" makes you more credible, not less.
+- The twist (the platform blocked OIDC) is your strongest part. It shows you can keep security intact under a constraint instead of giving up on it.
+- Name the proof. "A probe from a feature branch was denied" separates a real fix from a config change. Have the screenshots ready.
+- Don't oversell. Saying "a key is still worse than OIDC; here's what I'd add" makes you more credible.

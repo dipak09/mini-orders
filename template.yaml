@@ -7,6 +7,17 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, prod]
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Custom domain for the API, e.g. aws.hanuda.in. Empty = no custom domain
+  CertificateArn:
+    Type: String
+    Default: arn:aws:acm:ap-southeast-2:000000000000:certificate/not-set
+    Description: ACM certificate in this region. Only used when DomainName is set
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
 
 Globals:
   Function:
@@ -30,8 +41,27 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 50
-        ThrottlingRateLimit: 100
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+  
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasDomain
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasDomain
+    DependsOn: HttpApiApiGatewayDefaultStage
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomain
+      Stage: $default
 
   # ---------- Catalog service ----------
   ProductsTable:
@@ -187,6 +217,10 @@ Outputs:
   ApiUrl:
     Description: Base URL of the HTTP API
     Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  CustomDomainTarget:
+    Condition: HasDomain
+    Description: Point the Cloudflare CNAME at this
+    Value: !GetAtt ApiDomain.RegionalDomainName
   EventBusName:
     Value: !Ref EventBus
   NotificationsDLQUrl:

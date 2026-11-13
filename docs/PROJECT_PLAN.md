@@ -26,14 +26,16 @@ The step-by-step commands are in [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md). This file i
 |---|---|
 | [README.md](../README.md) | Architecture, design decisions, run steps, demo script |
 | [template.yaml](../template.yaml) | All AWS resources (SAM / CloudFormation). One `Stage` parameter: `dev` or `prod` |
-| [samconfig.toml](../samconfig.toml) | Defaults for `sam deploy` from the laptop: stack `mini-orders-dev`, region `ap-south-1` |
+| [samconfig.toml](../samconfig.toml) | Defaults for `sam deploy` from the laptop: stack `mini-orders-dev`, region `ap-southeast-2` |
 | [services/catalog/index.js](../services/catalog/index.js) | Catalog service: `POST /products`, `GET /products`, `GET /products/{id}` |
 | [services/orders/api.js](../services/orders/api.js) | Orders HTTP: `POST /orders`, `GET /orders/{id}`. Publishes `OrderCreated` |
 | [services/orders/status.js](../services/orders/status.js) | Orders event consumer: on `NotificationSent`, sets the order to `CONFIRMED` |
 | [services/notifications/index.js](../services/notifications/index.js) | SQS consumer: "sends" the email (a log line), publishes `NotificationSent` |
 | [tests/](../tests/) | Jest unit tests with `aws-sdk-client-mock`, one file per service |
 | [scripts/smoke-test.mjs](../scripts/smoke-test.mjs) | End-to-end test against a deployed API (`API_URL=... npm run smoke`) |
-| [infra/github-oidc.yaml](../infra/github-oidc.yaml) | One-time stack: GitHub OIDC provider and the `mini-orders-github-deploy` role |
+| [infra/github-oidc.yaml](../infra/github-oidc.yaml) | One-time stack: GitHub OIDC provider and deploy role. **Cannot be used on this account**: the AWS-managed SCP for project accounts denies `iam:*Provider*` |
+| [infra/github-deploy-user.yaml](../infra/github-deploy-user.yaml) | One-time stack actually used: deploy-only IAM user `mini-orders-github-deploy`, with a deny on self-escalation |
+| [scripts/setup-github.sh](../scripts/setup-github.sh) | One-time GitHub setup: environments limited to `main`, prod approval, variables, and the access key piped straight into environment secrets |
 | [.github/workflows/ci-cd.yml](../.github/workflows/ci-cd.yml) | Pipeline: test → deploy dev + smoke → manual approval → deploy prod + smoke |
 
 ### AWS resources per stack (created by `template.yaml`)
@@ -59,11 +61,11 @@ The step-by-step commands are in [DEPLOY_GUIDE.md](DEPLOY_GUIDE.md). This file i
 
 | Item | Value |
 |---|---|
-| AWS region | `ap-south-1` (Mumbai) |
+| AWS region | `ap-southeast-2` (Sydney). This account is a "project" account and AWS pins it to this home region; other regions are denied by an AWS-managed policy |
 | Prod URL | `https://aws.hanuda.in` → stack `mini-orders-prod` |
 | Dev URL | `https://aws-dev.hanuda.in` → stack `mini-orders-dev` |
 | DNS | Cloudflare, CNAME records, **DNS only** (grey cloud) |
-| TLS certificate | AWS Certificate Manager, in `ap-south-1`, validated by a DNS record in Cloudflare. Free |
+| TLS certificate | AWS Certificate Manager, in `ap-southeast-2`, validated by a DNS record in Cloudflare. Free |
 | Deploys | GitHub Actions with OIDC. No AWS keys stored in GitHub |
 
 Why `aws-dev.hanuda.in` and not `dev.aws.hanuda.in`: Cloudflare's free certificate covers one level of subdomain only. A two-level name breaks if you ever turn the Cloudflare proxy on.
@@ -83,7 +85,7 @@ Why DNS only: API Gateway already serves the certificate for the custom domain. 
 | G5 | `.jetro/` is not in `.gitignore`. It holds a `credentials.json` file that would be committed | Add `.jetro/` to `.gitignore` before the first commit | Phase 0 |
 | G6 | Public, unauthenticated write API throttled at 100 requests/second. A script hammering the URL could spend real credit (roughly $10+ a day at the full rate) | Lower the throttle to 5/second, burst 10. Add a budget alert | Phases 1 and 3 |
 | G7 | Pipeline does not pass the domain parameters, so a pipeline deploy would remove the custom domain that a laptop deploy added | Pass them from GitHub environment variables | Phase 4 |
-| G8 | Deploy role trusts `environment:*` ([github-oidc.yaml:49](../infra/github-oidc.yaml#L49)). GitHub creates environments on demand, so anyone who can push any branch can get PowerUser credentials, skipping review and the prod approval | Exact `StringEquals` on the `dev` and `production` subjects, plus `main`-only deployment branches on both environments. Written up in [INTERVIEW_SECURITY_ANSWER.md](INTERVIEW_SECURITY_ANSWER.md) | Phase 4 |
+| G8 | CI credentials reachable from any branch. OIDC plan: the role trusted `environment:*`, and GitHub creates environments on demand. Key-based plan (used here, because the account blocks OIDC): a repository secret is readable by a workflow on any branch | OIDC: exact `StringEquals` subjects (done in `github-oidc.yaml`). Keys: store only as **environment** secrets, restrict both environments to `main`, and deny the user self-escalation. Written up in [INTERVIEW_SECURITY_ANSWER.md](INTERVIEW_SECURITY_ANSWER.md) | Phase 4 |
 
 ### Should do (small, and each one is a good talking point)
 
@@ -131,6 +133,7 @@ Accounts created after July 2025 are on either a "free plan" or a "paid plan". O
 - [ ] `curl https://aws.hanuda.in/products` returns `{"items":[...]}` with a valid certificate
 - [ ] `API_URL=https://aws.hanuda.in npm run smoke` prints `All smoke tests passed`
 - [ ] A push to `main` deploys dev without touching the laptop
+- [ ] A workflow on a feature branch cannot get the AWS key (step 4.5 screenshots)
 - [ ] Prod deploy waits for your approval in GitHub
 - [ ] An order with `fail@example.com` lands in the dead-letter queue and the alarm goes red
 - [ ] X-Ray trace map shows the whole path

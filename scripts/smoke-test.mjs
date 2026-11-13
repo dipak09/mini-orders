@@ -1,5 +1,5 @@
 // End-to-end smoke test against a deployed stack.
-// Usage: API_URL=https://xxxx.execute-api.ap-south-1.amazonaws.com node scripts/smoke-test.mjs
+// Usage: API_URL=https://xxxx.execute-api.ap-southeast-2.amazonaws.com node scripts/smoke-test.mjs
 const API = (process.env.API_URL || '').replace(/\/$/, '');
 if (!API) { console.error('API_URL is required'); process.exit(1); }
 

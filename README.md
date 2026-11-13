@@ -73,22 +73,24 @@ sam build
 
 ### 2. First deploy from your laptop (fastest way to go live, about 3 minutes)
 ```bash
-sam deploy          # uses samconfig.toml -> stack mini-orders-dev in ap-south-1
+sam deploy          # uses samconfig.toml -> stack mini-orders-dev in ap-southeast-2
 # copy the ApiUrl output, then:
-API_URL=https://xxxx.execute-api.ap-south-1.amazonaws.com npm run smoke
+API_URL=https://xxxx.execute-api.ap-southeast-2.amazonaws.com npm run smoke
 ```
 
 ### 3. Wire up CI/CD
+
+> **New-style AWS "project" accounts can't use OIDC.** Their AWS-managed service control policy denies `iam:*Provider*`. On those accounts, use [infra/github-deploy-user.yaml](infra/github-deploy-user.yaml) and [scripts/setup-github.sh](scripts/setup-github.sh) instead, which store a deploy-only key as environment secrets limited to `main`. See [docs/DEPLOY_GUIDE.md](docs/DEPLOY_GUIDE.md), Phase 4. The OIDC steps below apply to standard accounts.
 ```bash
 # a) create the OIDC deploy role (one time)
 aws cloudformation deploy --template-file infra/github-oidc.yaml \
   --stack-name mini-orders-github-oidc --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides GitHubOrg=<your-github-username> \
-  --region ap-south-1
+  --region ap-southeast-2
 # (use CreateOIDCProvider=false if your account already has the GitHub OIDC provider)
 
 aws cloudformation describe-stacks --stack-name mini-orders-github-oidc \
-  --query "Stacks[0].Outputs[0].OutputValue" --output text --region ap-south-1
+  --query "Stacks[0].Outputs[0].OutputValue" --output text --region ap-southeast-2
 ```
 b) In GitHub, create the repo `mini-orders` and push this code.
 c) Under **Settings → Secrets → Actions**, add `AWS_DEPLOY_ROLE_ARN` = the ARN from step a.
@@ -98,7 +100,7 @@ e) Push to `main`. The pipeline runs **test → deploy-dev + smoke test → (app
 ## Live demo script
 
 ```bash
-API=https://xxxx.execute-api.ap-south-1.amazonaws.com
+API=https://xxxx.execute-api.ap-southeast-2.amazonaws.com
 
 curl -s -X POST $API/products -H 'content-type: application/json' \
   -d '{"name":"Mechanical Keyboard","price":49.99}'

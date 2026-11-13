@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  One-time bootstrap - IAM user for GitHub Actions deploys of mini-orders.
+  Used instead of infra/github-oidc.yaml because this account (a new-style AWS "project" account)
+  has an AWS-managed SCP that denies iam:*Provider*, so a GitHub OIDC provider cannot be created.
+  The access key is created separately with the CLI so the secret never appears in stack outputs.
+
+Resources:
+  DeployUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: mini-orders-github-deploy
+      # Demo scope: PowerUser + IAM limited to this app's roles (same as the OIDC role).
+      # Production: replace with a least-privilege policy or a CloudFormation service role.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: manage-app-roles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/mini-orders-*
+        - PolicyName: no-self-escalation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # If the key leaks, it cannot mint more users or keys, or change its own permissions.
+              - Effect: Deny
+                Action:
+                  - iam:CreateUser
+                  - iam:CreateAccessKey
+                  - iam:UpdateAccessKey
+                  - iam:AttachUserPolicy
+                  - iam:PutUserPolicy
+                  - iam:DeleteUserPolicy
+                  - iam:DetachUserPolicy
+                  - iam:AddUserToGroup
+                Resource: '*'
+
+Outputs:
+  DeployUserName:
+    Value: !Ref DeployUser

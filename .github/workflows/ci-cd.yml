@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false   # never cancel a deploy mid-flight
 
 env:
-  AWS_REGION: ap-south-1
+  AWS_REGION: ap-southeast-2
 
 jobs:
   # ---------- CI: runs on every PR and push ----------
@@ -38,7 +38,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
-    permissions: { id-token: write, contents: read }   # OIDC, no long-lived keys
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,11 +47,15 @@ jobs:
         with: { use-installer: true }
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          # Environment secrets (not repo secrets): only jobs in this environment, on main, can read them.
+          # Keys, not OIDC: this AWS project account's SCP denies creating an OIDC provider.
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       - run: sam build
       - run: >
-          sam deploy --stack-name mini-orders-dev --parameter-overrides Stage=dev
+          sam deploy --stack-name mini-orders-dev
+          --parameter-overrides Stage=dev DomainName=${{ vars.DOMAIN_NAME }} CertificateArn=${{ vars.CERTIFICATE_ARN }}
           --capabilities CAPABILITY_IAM --resolve-s3
           --no-confirm-changeset --no-fail-on-empty-changeset
       - id: out
@@ -69,7 +73,7 @@ jobs:
     needs: deploy-dev
     runs-on: ubuntu-latest
     environment: production
-    permissions: { id-token: write, contents: read }
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -78,11 +82,15 @@ jobs:
         with: { use-installer: true }
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          # Environment secrets (not repo secrets): only jobs in this environment, on main, can read them.
+          # Keys, not OIDC: this AWS project account's SCP denies creating an OIDC provider.
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       - run: sam build
       - run: >
-          sam deploy --stack-name mini-orders-prod --parameter-overrides Stage=prod
+          sam deploy --stack-name mini-orders-prod
+          --parameter-overrides Stage=prod DomainName=${{ vars.DOMAIN_NAME }} CertificateArn=${{ vars.CERTIFICATE_ARN }}
           --capabilities CAPABILITY_IAM --resolve-s3
           --no-confirm-changeset --no-fail-on-empty-changeset
       - id: out

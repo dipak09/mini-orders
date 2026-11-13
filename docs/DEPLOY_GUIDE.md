@@ -88,7 +88,7 @@ Do steps 1.1 to 1.4 in the AWS web console.
 aws configure
 # AWS Access Key ID:     paste
 # AWS Secret Access Key: paste
-# Default region name:   ap-south-1
+# Default region name:   ap-southeast-2
 # Default output format: json
 
 aws sts get-caller-identity
@@ -107,7 +107,7 @@ sam validate --lint     # expect: "is a valid SAM Template"
 sam build               # expect: "Build Succeeded"
 ```
 
-**2.2 Deploy.** This uses `samconfig.toml`, so the stack is `mini-orders-dev` in `ap-south-1`.
+**2.2 Deploy.** This uses `samconfig.toml`, so the stack is `mini-orders-dev` in `ap-southeast-2`.
 
 ```bash
 sam deploy
@@ -118,7 +118,7 @@ It takes about 3 minutes. At the end it prints an **Outputs** table. Copy the `A
 **2.3 Smoke test.**
 
 ```bash
-API_URL=https://<API_ID>.execute-api.ap-south-1.amazonaws.com npm run smoke
+API_URL=https://<API_ID>.execute-api.ap-southeast-2.amazonaws.com npm run smoke
 ```
 
 **Check:** five `PASS` lines, then `All smoke tests passed`.
@@ -128,6 +128,7 @@ If it fails:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Unable to locate credentials` | Phase 1.5 not done in this shell | Run `aws configure` again |
+| `AccessDenied ... with an explicit deny in a service control policy` | Accounts made with the new AWS sign-up are "project" accounts inside an AWS-managed organization. An AWS-managed service control policy pins each project to its **home region**; other regions are denied, and no IAM permission can override it. This account's home region is `ap-southeast-2` | Use the home region everywhere (`samconfig.toml`, the workflow's `AWS_REGION`, every `--region`). Find it at https://settings.aws.com → **Projects** → your project, or from the region in the console URL. Check with `aws cloudformation list-stacks --region ap-southeast-2`. Adding more regions needs "advanced features", which first requires upgrading to the paid plan; both are one-way |
 | `ROLLBACK_COMPLETE` | A resource failed to create | Console → CloudFormation → stack → **Events** tab, read the first red row. Then `sam delete --stack-name mini-orders-dev` and redeploy |
 | Smoke test stuck before "confirmed asynchronously" | The event path is broken | Console → CloudWatch → Log groups → the Notifications function log |
 
@@ -137,14 +138,14 @@ If it fails:
 
 ### 3.1 Request the certificate
 
-One certificate covers both names. It must be in `ap-south-1`, the same region as the API.
+One certificate covers both names. It must be in `ap-southeast-2`, the same region as the API.
 
 ```bash
 aws acm request-certificate \
   --domain-name aws.hanuda.in \
   --subject-alternative-names aws-dev.hanuda.in \
   --validation-method DNS \
-  --region ap-south-1
+  --region ap-southeast-2
 ```
 
 Copy the `CertificateArn` from the output. That is `<CERT_ARN>`.
@@ -152,7 +153,7 @@ Copy the `CertificateArn` from the output. That is `<CERT_ARN>`.
 ### 3.2 Get the validation records
 
 ```bash
-aws acm describe-certificate --certificate-arn <CERT_ARN> --region ap-south-1 \
+aws acm describe-certificate --certificate-arn <CERT_ARN> --region ap-southeast-2 \
   --query "Certificate.DomainValidationOptions[].ResourceRecord" --output table
 ```
 
@@ -170,8 +171,8 @@ You get two rows, one per name. Each has a **Name** (starts with `_`) and a **Va
 ### 3.4 Wait until the certificate is issued
 
 ```bash
-aws acm wait certificate-validated --certificate-arn <CERT_ARN> --region ap-south-1
-aws acm describe-certificate --certificate-arn <CERT_ARN> --region ap-south-1 \
+aws acm wait certificate-validated --certificate-arn <CERT_ARN> --region ap-southeast-2
+aws acm describe-certificate --certificate-arn <CERT_ARN> --region ap-southeast-2 \
   --query Certificate.Status --output text      # expect ISSUED
 ```
 
@@ -190,7 +191,7 @@ Four edits.
     Description: Custom domain for the API, e.g. aws.hanuda.in. Empty = no custom domain
   CertificateArn:
     Type: String
-    Default: arn:aws:acm:ap-south-1:000000000000:certificate/not-set
+    Default: arn:aws:acm:ap-southeast-2:000000000000:certificate/not-set
     Description: ACM certificate in this region. Only used when DomainName is set
 
 Conditions:
@@ -253,11 +254,11 @@ parameter_overrides = "Stage=dev DomainName=aws-dev.hanuda.in CertificateArn=<CE
 sam validate --lint
 sam build && sam deploy
 
-aws cloudformation describe-stacks --stack-name mini-orders-dev --region ap-south-1 \
+aws cloudformation describe-stacks --stack-name mini-orders-dev --region ap-southeast-2 \
   --query "Stacks[0].Outputs[?OutputKey=='CustomDomainTarget'].OutputValue" --output text
 ```
 
-The output looks like `d-abc123xyz.execute-api.ap-south-1.amazonaws.com`.
+The output looks like `d-abc123xyz.execute-api.ap-southeast-2.amazonaws.com`.
 
 ### 3.8 Add the domain record in Cloudflare
 
@@ -285,125 +286,108 @@ API_URL=https://aws-dev.hanuda.in npm run smoke
 
 ## Phase 4 — GitHub and CI/CD (45 min)
 
-### 4.1 Create the deploy role (one time)
+> **Why not OIDC on this account.** The plan was GitHub OIDC with no stored keys ([infra/github-oidc.yaml](../infra/github-oidc.yaml)). This account is a new-style AWS "project" account. Its AWS-managed service control policy denies `iam:*Provider*` on both the Free and the Paid plan, so the OIDC provider cannot be created (`iam:CreateOpenIDConnectProvider ... explicit deny in a service control policy`). The pipeline therefore uses a dedicated deploy-only IAM user, with its key stored only as GitHub **environment** secrets. `github-oidc.yaml` stays in the repo for accounts where OIDC is allowed.
 
-First, tighten the trust policy (gap G8). In [infra/github-oidc.yaml](../infra/github-oidc.yaml), replace the `Condition:` block of `DeployRole` with:
-
-```yaml
-            Condition:
-              StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubOrg}/${RepoName}:environment:dev
-                  - !Sub repo:${GitHubOrg}/${RepoName}:environment:production
-```
-
-The original `environment:*` lets a workflow on any branch invent an environment name and get the role.
+### 4.1 Create the deploy user (one time) — done
 
 ```bash
-aws cloudformation deploy --template-file infra/github-oidc.yaml \
-  --stack-name mini-orders-github-oidc --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides GitHubOrg=<GH_USER> \
-  --region ap-south-1
-
-aws cloudformation describe-stacks --stack-name mini-orders-github-oidc --region ap-south-1 \
-  --query "Stacks[0].Outputs[0].OutputValue" --output text
+aws cloudformation deploy --template-file infra/github-deploy-user.yaml \
+  --stack-name mini-orders-github-deploy-user --capabilities CAPABILITY_NAMED_IAM \
+  --region ap-southeast-2
 ```
 
-Copy the printed ARN (`arn:aws:iam::<ACCOUNT_ID>:role/mini-orders-github-deploy`).
+[infra/github-deploy-user.yaml](../infra/github-deploy-user.yaml) creates `mini-orders-github-deploy` with the same permissions the OIDC role would have had. It also has an explicit deny on creating users or access keys and on changing its own policies, so a leaked key can't give itself more power. The template creates no key, so the secret never appears in stack outputs.
 
-`GitHubOrg` is case-sensitive and must match your GitHub username exactly. The repo must be named `mini-orders`, or pass `RepoName=<name>` as well.
+### 4.2 Pipeline changes — done
 
-### 4.2 Pass the domain through the pipeline
+[.github/workflows/ci-cd.yml](../.github/workflows/ci-cd.yml) now:
+- reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` from environment secrets instead of assuming a role
+- no longer asks for `id-token: write`
+- passes `DomainName` and `CertificateArn` from environment variables. Without this, the first pipeline run deletes the custom domain.
 
-Without this, the first pipeline run deploys with an empty `DomainName` and deletes the custom domain you just created.
+### 4.3 GitHub environments, variables and the key
 
-In `.github/workflows/ci-cd.yml`, change both `sam deploy` commands.
-
-Dev job:
-
-```yaml
-      - run: >
-          sam deploy --stack-name mini-orders-dev
-          --parameter-overrides Stage=dev DomainName=${{ vars.DOMAIN_NAME }} CertificateArn=${{ vars.CERTIFICATE_ARN }}
-          --capabilities CAPABILITY_IAM --resolve-s3
-          --no-confirm-changeset --no-fail-on-empty-changeset
-```
-
-Prod job: the same, with `mini-orders-prod` and `Stage=prod`.
-
-### 4.3 Create the repo and push
+Run this yourself. It creates the access key and pipes it straight into GitHub, so the secret is never printed, saved to disk or pasted into a chat.
 
 ```bash
-git init -b main
-git add .
-git status                 # confirm .jetro/, node_modules/, .aws-sam/ are NOT listed
-git commit -m "Initial commit: mini-orders"
-
-gh auth login              # if not already logged in
-gh repo create mini-orders --private --source=. --remote=origin
+REPO=dipak09/mini-orders \
+CERT_ARN=arn:aws:acm:ap-southeast-2:764988200316:certificate/dca36602-d0c7-42a5-ad8c-38e4f48a0160 \
+bash scripts/setup-github.sh
 ```
 
-Do not push yet. Set up the repo first, or the first run fails.
+[scripts/setup-github.sh](../scripts/setup-github.sh) does the following:
+1. Creates environments `dev` and `production`, both restricted to the **`main`** branch. `production` requires **your** approval.
+2. Sets `DOMAIN_NAME` and `CERTIFICATE_ARN` in each environment.
+3. Creates the access key and stores it as **environment** secrets in both environments. They are deliberately not repository secrets: a repo secret can be read by a workflow on any branch.
 
-A private repo on a free GitHub plan cannot use **required reviewers** on environments. If the approval option is missing in 4.4, make the repo public (`gh repo edit --visibility public --accept-visibility-change-consequences`). The certificate ARN and account ID in `samconfig.toml` are identifiers, not secrets, but look through the files once before going public.
+**Check:** repo → **Settings → Environments** shows both environments with "1 branch policy". `production` shows the required reviewer. Each has 2 secrets and 2 variables.
 
-### 4.4 Configure the repo on github.com
+The repo is public, which is what makes required reviewers available on the free GitHub plan. Nothing secret is committed: the account ID and certificate ARN in `samconfig.toml` are identifiers.
 
-1. Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**. Name `AWS_DEPLOY_ROLE_ARN`, value = the ARN from 4.1.
-2. **Settings** → **Environments** → **New environment** → name `dev` → **Configure environment**.
-   - Under **Environment variables** add `DOMAIN_NAME` = `aws-dev.hanuda.in` and `CERTIFICATE_ARN` = `<CERT_ARN>`.
-3. **New environment** → name `production` (exactly this spelling, the workflow uses it).
-   - Tick **Required reviewers**, add yourself, **Save protection rules**.
-   - Add `DOMAIN_NAME` = `aws.hanuda.in` and `CERTIFICATE_ARN` = `<CERT_ARN>`.
-4. For **both** environments: **Deployment branches and tags** → **Selected branches and tags** → add rule `main`. Only `main` can then run a job in `dev` or `production`.
+### 4.4 Create `main` and push
 
-### 4.4b Prove the trust policy fix (5 min, after 4.5 is green)
-
-This is the evidence for the interview answer.
+The repo currently has only a `dev` branch, and the pipeline deploys from `main`.
 
 ```bash
-git checkout -b oidc-test
-mkdir -p .github/workflows
-cat > .github/workflows/oidc-test.yml <<'EOF'
-name: oidc-test
-on: push
-permissions: { id-token: write, contents: read }
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    environment: test
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with: { role-to-assume: "${{ secrets.AWS_DEPLOY_ROLE_ARN }}", aws-region: ap-south-1 }
-EOF
-git add .github/workflows/oidc-test.yml && git commit -m "test: oidc probe" && git push -u origin oidc-test
+git add -A
+git status                        # .jetro/, node_modules/, .aws-sam/ must NOT be listed
+git commit -m "ci: deploy with scoped IAM user, custom domain params, Sydney region"
+git push origin dev               # keep dev up to date
+git push origin dev:main          # create main from dev -> triggers the pipeline
+gh api -X PATCH repos/dipak09/mini-orders -f default_branch=main >/dev/null   # make main the default
 gh run watch
 ```
 
-**Expected:** the job fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`. Take a screenshot. Then clean up:
+From now on, work on a branch, open a PR into `main`, and merge. PRs run only the `test` job.
 
-```bash
-git checkout main
-git push origin --delete oidc-test && git branch -D oidc-test
-```
-
-Delete the auto-created `test` environment in **Settings → Environments**.
-
-### 4.5 Push and watch
-
-```bash
-git push -u origin main
-gh run watch
-```
-
-**Check:** the `test` job is green, `deploy-dev` is green, and `deploy-prod` shows **Waiting** for review.
+**Check:** `test` is green, `deploy-dev` is green (smoke test passes on `aws-dev.hanuda.in`), and `deploy-prod` shows **Waiting** for review.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | `GitHubOrg` or repo name does not match, or the environment name is wrong | Redeploy 4.1 with the exact username |
-| `Could not load credentials` | Secret name misspelled | Must be `AWS_DEPLOY_ROLE_ARN` |
-| Custom domain disappeared after the run | Environment variables from 4.4 are missing | Add them, re-run the job |
+| `Credentials could not be loaded` | Secrets missing in that environment | Re-run 4.3 (delete the existing key first, as the script tells you) |
+| `Branch "x" is not allowed to deploy to dev` | Expected for non-`main` branches | Merge to `main` |
+| Custom domain disappeared after the run | Environment variables missing | Re-run 4.3, re-run the job |
+| `explicit deny in a service control policy` | A command ran in a region other than `ap-southeast-2` | Check `AWS_REGION` in the workflow |
+
+### 4.5 Prove the secrets are fenced off (5 min, after 4.4 is green)
+
+This is the evidence for the interview answer. A workflow on a feature branch tries two ways to get the key.
+
+```bash
+git checkout -b probe
+cat > .github/workflows/probe.yml <<'EOF'
+name: probe
+on: push
+permissions: { contents: read }
+jobs:
+  via-environment:            # tries to enter the dev environment from a non-main branch
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - run: echo "should never run"
+  without-environment:        # tries to read the secret with no environment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-2
+EOF
+git add .github/workflows/probe.yml && git commit -m "test: secrets probe" && git push -u origin probe
+gh run watch
+```
+
+**Expected:**
+- `via-environment` is rejected: *Branch "probe" is not allowed to deploy to dev due to environment protection rules.*
+- `without-environment` fails because the secret is empty.
+
+Screenshot both. Clean up:
+
+```bash
+git checkout dev
+git push origin --delete probe && git branch -D probe
+```
 
 ---
 
@@ -414,7 +398,7 @@ gh run watch
 **5.2 Read the prod CNAME target.**
 
 ```bash
-aws cloudformation describe-stacks --stack-name mini-orders-prod --region ap-south-1 \
+aws cloudformation describe-stacks --stack-name mini-orders-prod --region ap-southeast-2 \
   --query "Stacks[0].Outputs[?OutputKey=='CustomDomainTarget'].OutputValue" --output text
 ```
 
@@ -542,14 +526,17 @@ Order matters. Remove DNS first: a CNAME left pointing at a deleted API Gateway 
 1. **Cloudflare:** delete the `aws` and `aws-dev` CNAME records and the two `_...` validation records.
 2. **Stacks:**
    ```bash
-   sam delete --stack-name mini-orders-prod --region ap-south-1
-   sam delete --stack-name mini-orders-dev  --region ap-south-1
-   aws cloudformation delete-stack --stack-name mini-orders-github-oidc --region ap-south-1
+   sam delete --stack-name mini-orders-prod --region ap-southeast-2
+   sam delete --stack-name mini-orders-dev  --region ap-southeast-2
+   # the deploy user's access key must be deleted first, or the stack delete fails
+   aws iam list-access-keys --user-name mini-orders-github-deploy --query "AccessKeyMetadata[].AccessKeyId" --output text \
+     | xargs -n1 aws iam delete-access-key --user-name mini-orders-github-deploy --access-key-id
+   aws cloudformation delete-stack --stack-name mini-orders-github-deploy-user --region ap-southeast-2
    ```
 3. **Certificate:**
    ```bash
-   aws acm delete-certificate --certificate-arn <CERT_ARN> --region ap-south-1
+   aws acm delete-certificate --certificate-arn <CERT_ARN> --region ap-southeast-2
    ```
 4. **SAM's deployment bucket:** console → S3 → the bucket starting with `aws-sam-cli-managed-default` → **Empty** → then CloudFormation → delete the stack `aws-sam-cli-managed-default`.
-5. **Access key:** IAM → Users → `admin-cli` → Security credentials → delete the access key.
+5. **Access key:** IAM → Users → `admin-cli` → Security credentials → delete the access key. Also delete the GitHub environments (repo → Settings → Environments), which removes the stored secrets.
 6. **Check:** Billing → Bills, a day later, shows $0 for the month.
